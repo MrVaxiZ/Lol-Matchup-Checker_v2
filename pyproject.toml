@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lol-matchup-checker"
+version = "2.0.0"
+description = "Scrapes League of Legends matchup win rates from u.gg (through Cloudflare, via Scrapling) into an Excel sheet."
+readme = "README.md"
+license = {text = "MIT"}
+authors = [{name = "MrVaxiZ"}]
+requires-python = ">=3.10"
+dependencies = [
+    "scrapling[fetchers]>=0.4.15",
+    "openpyxl>=3.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+lol-matchup = "lol_matchup_checker.cli:main"
+
+[tool.setuptools]
+packages = ["lol_matchup_checker"]

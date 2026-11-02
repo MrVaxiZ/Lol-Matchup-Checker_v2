@@ -100,19 +100,44 @@ _SPECIAL_SLUGS: dict[str, str] = {
 _PATCH_RE = re.compile(r"^\s*(\d{1,2})\s*[._,-]\s*(\d{1,2})\s*$")
 
 
-def normalize_patch(text: str) -> str:
-    """'26.18', '26_18', '26-18' -> '26.18'. Raises ValueError for anything else."""
+# Riot renamed patches by year in 2025: what the game and u.gg's pages call "26.21" is
+# internally patch 16.21, and u.gg's URLs and data use the internal number (patch=16_21).
+_YEAR_NAMING_OFFSET = 10
+
+
+def _split_patch(text: str) -> tuple[int, int]:
     match = _PATCH_RE.match(text or "")
     if not match:
         raise ValueError(f"'{text}' is not a patch number, expected something like 26.18")
-    return f"{int(match.group(1))}.{int(match.group(2))}"
+    return int(match.group(1)), int(match.group(2))
+
+
+def patch_display(text: str) -> str:
+    """Patch as players see it: '16_21' / '16.21' / '26.21' -> '26.21'."""
+    major, minor = _split_patch(text)
+    if 15 <= major < 15 + _YEAR_NAMING_OFFSET:
+        major += _YEAR_NAMING_OFFSET
+    return f"{major}.{minor}"
+
+
+def patch_internal(text: str) -> str:
+    """Patch as u.gg's URLs want it: '26.21' / '16.21' -> '16_21'."""
+    major, minor = _split_patch(patch_display(text))
+    if major >= 15 + _YEAR_NAMING_OFFSET:
+        major -= _YEAR_NAMING_OFFSET
+    return f"{major}_{minor}"
+
+
+def normalize_patch(text: str) -> str:
+    """'26.18', '26_18', '26-18', '16.18' -> '26.18'. Raises ValueError for anything else."""
+    return patch_display(text)
 
 
 def with_patch(url: str, patch: str | None) -> str:
-    """Add u.gg's patch filter to a URL; u.gg writes patches with an underscore (patch=26_18)."""
+    """Add u.gg's patch filter to a URL (patch 26.18 -> ?patch=16_18)."""
     if not patch:
         return url
-    return f"{url}{'&' if '?' in url else '?'}patch={patch.replace('.', '_')}"
+    return f"{url}{'&' if '?' in url else '?'}patch={patch_internal(patch)}"
 
 
 def fetch_known_champion_names(timeout: float = 10.0) -> dict[str, str]:

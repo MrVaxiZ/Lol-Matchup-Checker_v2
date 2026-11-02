@@ -137,8 +137,8 @@ def test_normalize_patch_rejects(bad):
 
 def test_with_patch():
     from lol_matchup_checker.data import with_patch
-    assert with_patch("https://u.gg/lol/jungle-tier-list", "26.18") == "https://u.gg/lol/jungle-tier-list?patch=26_18"
-    assert with_patch("https://u.gg/lol/champions/garen/build/top?opp=darius", "26.18").endswith("?opp=darius&patch=26_18")
+    assert with_patch("https://u.gg/lol/jungle-tier-list", "26.18") == "https://u.gg/lol/jungle-tier-list?patch=16_18"
+    assert with_patch("https://u.gg/lol/champions/garen/build/top?opp=darius", "26.18").endswith("?opp=darius&patch=16_18")
     assert with_patch("https://u.gg/x", None) == "https://u.gg/x"
 
 
@@ -152,3 +152,30 @@ def test_parse_page_patch():
 def test_excel_patch_label(tmp_path):
     out = write_excel(tmp_path / "p.xlsx", ["Darius"], ["Garen"], [Matchup("Darius", "Garen", 10, 52.0)], patch_label="26.18")
     assert load_workbook(out)["Matchups"]["A1"].value == "Patch 26.18"
+
+
+@pytest.mark.parametrize("text,display,internal", [
+    ("26.21", "26.21", "16_21"), ("16_21", "26.21", "16_21"), ("16.9", "26.9", "16_9"),
+    ("25.24", "25.24", "15_24"), ("14.20", "14.20", "14_20"),
+])
+def test_patch_naming(text, display, internal):
+    from lol_matchup_checker.data import patch_display, patch_internal
+    assert patch_display(text) == display
+    assert patch_internal(text) == internal
+
+
+def test_parse_tier_list_data_from_embedded_json():
+    from lol_matchup_checker.parsing import parse_tier_list_data
+    data = parse_tier_list_data(load("tier_list_ssr.html"), "jungle")
+    assert data.patch == "26.21"
+    names = [e.name for e in data.entries]
+    assert names[:3] == ["Lee Sin", "Jarvan IV", "Kha'Zix"]  # most played first
+    assert len(names) == 8
+    nunu = next(e for e in data.entries if e.name == "Nunu & Willump")
+    assert (nunu.pick_rate, nunu.matches, nunu.champion_id) == (0.5, 9000, "20")
+    assert [e.name for e in parse_tier_list_data(load("tier_list_ssr.html"), "top").entries] == ["Teemo"]
+
+
+def test_parse_tier_list_data_absent():
+    from lol_matchup_checker.parsing import parse_tier_list_data
+    assert parse_tier_list_data(load("tier_list.html"), "jungle") is None

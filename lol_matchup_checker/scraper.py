@@ -16,6 +16,8 @@ from .data import Lane, champion_slug, fetch_known_champion_names, with_patch
 from .models import Matchup, merge_tier_list
 from .parsing import (
     ParseError,
+    TierListData,
+    parse_tier_list_data,
     is_cloudflare_challenge,
     parse_lane_champions,
     parse_matchup_stats,
@@ -39,6 +41,7 @@ class ScraperOptions:
     debug: bool = False  # verbose logs + dump HTML of failed pages
     debug_dir: Path = Path("debug")
     patch: str | None = None  # e.g. "26.18"; None = whatever u.gg shows by default (latest)
+    min_pick_rate: float = 0.5  # % of games in the lane; 0.5 matches u.gg's own tier list
 
 
 # ----------------------------------------------------------------- page actions
@@ -70,7 +73,12 @@ _JS_COLLECT = """(lane) => {
     return {names, links};
 }"""
 
-_CHAMP_ELEMENTS = 'strong.champion-name, a[href*="/lol/champions/"]'
+_JS_HAS_EMBEDDED_RANKING = """() => {
+    const s = document.getElementById('reactn-preloaded-state');
+    return !!(s && s.textContent.includes('champion_ranking'));
+}"""
+
+_CHAMP_ELEMENTS ='strong.champion-name, a[href*="/lol/champions/"]'
 
 # Scrolls the element that actually scrolls the champion list (an inner container or the window)
 # by `step` px. Returns true if anything moved.
@@ -133,6 +141,11 @@ def _make_tier_list_hooks(found: _TierListFindings, lane: Lane, debug_shot: Path
         found.links.clear()
         await _accept_cookies(page)
         try:
+            if await page.evaluate(_JS_HAS_EMBEDDED_RANKING):
+                return  # u.gg's data is in the page; no need to scroll through the layout
+        except Exception:
+            pass
+        try:
             await page.wait_for_selector(_CHAMP_ELEMENTS, timeout=20_000)
         except Exception:
             return  # let the parser/debug dump report what we actually got
@@ -193,6 +206,7 @@ class UggScraper:
         self._session: AsyncStealthySession | None = None
         self.patch_shown: str | None = None  # patch u.gg says it's showing (from the tier list title)
         self.patch_mismatch = False
+        self.lane_all_champions: list[str] = []  # everyone with games in the lane, incl. below the pick-rate cutoff
         logging.getLogger("scrapling").setLevel(logging.WARNING if options.debug else logging.CRITICAL)
 
     async def __aenter__(self) -> "UggScraper":
@@ -218,13 +232,35 @@ class UggScraper:
 
     # -------------------------------------------------------------- tier list
 
-    def _check_patch(self, page) -> None:
-        """Remember which patch u.gg says it's showing; warn if it ignored the requested one."""
-        shown = parse_page_patch(page)
+    def _use_tier_data(self, data: TierListData, lane: Lane) -> list[str]:
+        """Opponents = champions above the pick-rate cutoff (u.gg's own default list is >= 0.5%)."""
+        self.lane_all_champions = [e.name for e in data.entries if e.matches > 0]
+        picked = [e for e in data.entries if e.pick_rate >= self.opt.min_pick_rate]
+        for i, e in enumerate(picked):
+            self.log(f"[{i}] Found champion : '{e.name}' ({e.pick_rate:.2f}% pick rate, {e.matches:,} games)")
+        self.log(f"Found total of [{len(picked)}] {lane.value} champions with pick rate >= {self.opt.min_pick_rate}% "
+                 f"(out of {len(self.lane_all_champions)} played there).")
+        return [e.name for e in picked]
+
+    def _debug_tier_data(self, page, lane: Lane, data: TierListData, champions: list[str], stamp: str) -> None:
+        html = self._dump(page, f"tierlist_{lane.value}")
+        try:
+            report = self.opt.debug_dir / f"_debug_{stamp}_tierlist_{lane.value}.txt"
+            lines = [f"url: {page.url}", f"patch in data: {data.patch}", f"min pick rate: {self.opt.min_pick_rate}%",
+                     f"selected ({len(champions)}): {champions}", "", "all entries [name, id, pick rate %, matches, win rate %]:"]
+            lines += [f"  {e.name}\t{e.champion_id}\t{e.pick_rate:.3f}\t{e.matches}\t{e.win_rate:.2f}" for e in data.entries]
+            report.write_text("\n".join(lines), encoding="utf-8")
+            self.log(f"[debug] tier list saved: {html}, {report}")
+        except Exception as exc:
+            self.log(f"[debug] could not write tier list report: {exc}")
+
+    def _check_patch(self, page, data_patch: str | None = None) -> None:
+        """Remember which patch u.gg is showing; warn if it ignored the requested one."""
+        shown = data_patch or parse_page_patch(page)
         self.patch_shown = shown
         if self.opt.patch and shown and shown != self.opt.patch:
             self.log(f"WARNING: asked for patch {self.opt.patch} but u.gg is showing {shown}. "
-                     "u.gg probably has no data for that patch anymore (it only keeps recent ones).")
+                     "u.gg probably has no data for that patch.")
             self.patch_mismatch = True
 
     async def get_lane_champions(self, lane: Lane) -> list[str]:
@@ -235,7 +271,7 @@ class UggScraper:
         stamp = time.strftime("%Y%m%d_%H%M%S")
         shot = self.opt.debug_dir / f"_debug_{stamp}_tierlist_{lane.value}.png" if self.opt.debug else None
         setup, action = _make_tier_list_hooks(found, lane, shot)
-        known_names = await asyncio.to_thread(fetch_known_champion_names)
+        known_names: dict | None = None  # only needed for the fallback
 
         for attempt in range(1, self.opt.retries + 1):
             try:
@@ -252,7 +288,21 @@ class UggScraper:
                 if is_cloudflare_challenge(page):
                     last_error = "still on the Cloudflare challenge page"
                 else:
-                    # names/links seen while scrolling + whatever is in the final HTML
+                    # 1) u.gg's own data embedded in the page: every champion, with pick rates
+                    tier_data = parse_tier_list_data(page, lane.value)
+                    if tier_data and tier_data.entries:
+                        champions = self._use_tier_data(tier_data, lane)
+                        if self.opt.debug:
+                            self._debug_tier_data(page, lane, tier_data, champions, stamp)
+                        if champions:
+                            self._check_patch(page, tier_data.patch)
+                            return champions
+                        last_error = f"no champions with pick rate >= {self.opt.min_pick_rate}%"
+                        break
+                    # 2) fallback: names/links seen while scrolling + whatever is in the final HTML
+                    self.log("Embedded tier list data not found, reading the page instead.")
+                    if known_names is None:
+                        known_names = await asyncio.to_thread(fetch_known_champion_names)
                     champions = merge_tier_list([*found.names, *parse_lane_champions(page)], found.links, known_names)
                     if self.opt.debug:
                         self._debug_tier_list(page, lane, found, champions, stamp)

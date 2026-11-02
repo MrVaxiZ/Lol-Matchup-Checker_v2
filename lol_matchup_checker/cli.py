@@ -38,7 +38,10 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Champions you play (names or aliases, see `alias`).")
     gen.add_argument("--out", default="Matchups.xlsx", help="Output Excel path (default: Matchups.xlsx).")
     gen.add_argument("--patch", type=_patch_arg, default=None, metavar="PATCH",
-                     help="Patch to pull data for, e.g. 26.18 (default: latest). u.gg only keeps recent patches.")
+                     help="Patch to pull data for, e.g. 26.18 (default: latest).")
+    gen.add_argument("--min-pick-rate", type=float, default=0.5, metavar="PERCENT",
+                     help="Only include opponents picked in at least this %% of the lane's games "
+                          "(default: 0.5, same as u.gg's tier list). 0 = every champion u.gg has games for.")
     gen.add_argument("--workers", type=int, default=4, help="Pages scraped in parallel (default: 4).")
     gen.add_argument("--retries", type=int, default=3, help="Attempts per page (default: 3).")
     gen.add_argument("--timeout", type=int, default=60, help="Seconds per page (default: 60).")
@@ -74,6 +77,7 @@ async def cmd_gen(args: argparse.Namespace) -> int:
         block_ads=not args.no_block_ads,
         debug=args.debug,
         patch=args.patch,
+        min_pick_rate=max(0.0, args.min_pick_rate),
     )
 
     print(f"Patch: {args.patch}" if args.patch else "Patch: latest")
@@ -86,6 +90,14 @@ async def cmd_gen(args: argparse.Namespace) -> int:
         patch_label = scraper.patch_shown or args.patch or "latest"
 
         my_champs, unknown = resolve_champions(args.champs, lane_champs)
+        if unknown and scraper.lane_all_champions:
+            # below the pick-rate cutoff, but u.gg still has games for them in this lane
+            rare, unknown = resolve_champions(unknown, scraper.lane_all_champions)
+            for name in rare:
+                if name not in my_champs:
+                    print(f"{name} is below the {args.min_pick_rate}% pick-rate cutoff in {lane.value}, "
+                          "but u.gg has games for it. Including it (matchup data may be thin).")
+                    my_champs.append(name)
         still_unknown = []
         for raw in unknown:
             # Not on the tier list (off-meta pick, or the list didn't fully load):

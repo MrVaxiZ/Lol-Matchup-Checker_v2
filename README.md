@@ -53,7 +53,8 @@ python -m lol_matchup_checker gen --lane top --champs vlad darius ww
 | `--lane`/`--role` | Required. `top`, `jg`/`jng`/`jungle`, `mid`, `adc`/`bot`, `sup`/`support`  | `--lane mid`                |
 | `--champs`        | Required. Champions you play (names or aliases).                            | `--champs lb vlad`          |
 | `--out`           | Output Excel path (default `Matchups.xlsx`).                                | `--out "C:\mid_champs.xlsx"`|
-| `--patch`         | Patch to pull data for (default: latest). u.gg only keeps recent patches.   | `--patch 26.18`             |
+| `--patch`         | Patch to pull data for (default: latest).                                  | `--patch 26.18`             |
+| `--min-pick-rate` | Only opponents picked in at least this % of the lane's games (default 0.5, same as u.gg's tier list; 0 = everyone). | `--min-pick-rate 1` |
 | `--workers`       | Pages scraped in parallel (default 4). Lower it if you get blocked.         | `--workers 2`               |
 | `--retries`       | Attempts per page (default 3).                                              | `--retries 5`               |
 | `--timeout`       | Seconds per page (default 60).                                              | `--timeout 90`              |
@@ -103,9 +104,10 @@ tests/           # offline tests: pytest
 
 ## 🧠 How it works
 
-1. Opens the lane's u.gg tier list with Scrapling (`solve_cloudflare=True`), scrolls until all rows are loaded and reads the champion names.
+1. Opens the lane's u.gg tier list with Scrapling (`solve_cloudflare=True`) and reads the data u.gg embeds in the page (the same `champion_ranking` feed the site is built from): every champion with games in that lane, with pick rate and match count. Champions picked in at least `--min-pick-rate` % of games become the opponents, which by default is exactly u.gg's own list. If that data is ever missing, it falls back to reading the page itself.
 2. For each *(your champ, enemy champ)* pair it opens `u.gg/lol/champions/<enemy>/build/<lane>?opp=<your champ>` and reads **Win Rate** and **Matches** from the stats bar. That page shows the enemy's win rate, so your win rate is `100 − value`.
-3. Pages share one browser (and its Cloudflare clearance cookie); up to `--workers` tabs run at once.
+3. `--patch 26.18` is sent to u.gg as `patch=16_18` (u.gg's internal patch number) on every page, and the patch u.gg actually served is checked and written into cell A1.
+4. Pages share one browser (and its Cloudflare clearance cookie); up to `--workers` tabs run at once.
 
 ---
 

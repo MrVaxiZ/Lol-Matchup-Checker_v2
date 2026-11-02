@@ -5,9 +5,13 @@ Everything here works on a Scrapling `Selector` (a fetched `Response` is one too
 
 from __future__ import annotations
 
+import json
 import re
+from dataclasses import dataclass
 
 from scrapling.parser import Selector
+
+from .data import patch_display
 
 _NUMBER = re.compile(r"\d+(?:[.,]\d+)?")
 
@@ -30,7 +34,90 @@ def parse_page_patch(page: Selector) -> str | None:
     """Patch u.gg says the page is showing, from the title ('... Tier List - Patch 26.20 ...')."""
     title = str(page.css("title::text").get() or "")
     match = re.search(r"Patch\s+(\d{1,2})[._](\d{1,2})", title, re.I)
-    return f"{int(match.group(1))}.{int(match.group(2))}" if match else None
+    return patch_display(f"{match.group(1)}.{match.group(2)}") if match else None
+
+
+@dataclass
+class TierListEntry:
+    name: str
+    champion_id: str
+    win_rate: float
+    pick_rate: float  # percent of games in this role
+    matches: int
+
+
+@dataclass
+class TierListData:
+    entries: list[TierListEntry]  # every champion u.gg has data for in this role, most played first
+    patch: str | None  # display form, e.g. "26.21"
+
+
+_SSR_START = "window.__SSR_DATA__ ="
+_SSR_END = "window.__APOLLO_STATE__"
+
+
+def _ssr_data(html: str) -> dict | None:
+    """The JSON u.gg embeds in every page: <script id="reactn-preloaded-state"> ...
+    window.__SSR_DATA__ = {...}  window.__APOLLO_STATE__ = ... </script>"""
+    start = html.find(_SSR_START)
+    if start < 0:
+        return None
+    start += len(_SSR_START)
+    end = html.find(_SSR_END, start)
+    blob = html[start:end if end > 0 else None].strip().rstrip(";").strip()
+    if blob.endswith("</script>"):
+        blob = blob[: -len("</script>")].rstrip().rstrip(";")
+    try:
+        data = json.loads(blob)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def parse_tier_list_data(page: Selector | str, role: str) -> TierListData | None:
+    """Every champion u.gg has ranked data for in `role` ('top', 'jungle', 'mid', 'adc', 'support'),
+    read from the data embedded in a tier-list page. None if the page doesn't contain it."""
+    html = page if isinstance(page, str) else str(page.html_content)
+    ssr = _ssr_data(html)
+    if not ssr:
+        return None
+
+    ranking_keys = [k for k in ssr if "champion_ranking" in k]
+    key = next((k for k in ranking_keys if "ranked_solo_5x5" in k), ranking_keys[0] if ranking_keys else None)
+    if key is None:
+        return None
+    try:
+        rows = ssr[key]["data"]["win_rates"][role]
+    except (KeyError, TypeError):
+        return None
+
+    names: dict[str, str] = {}
+    champ_key = next((k for k in ssr if k.endswith("/champion.json")), None)
+    if champ_key:
+        champs = (ssr[champ_key] or {}).get("data") or {}
+        champs = champs.get("data", champs) if isinstance(champs, dict) else {}
+        for champ in champs.values():
+            if isinstance(champ, dict) and "key" in champ and "name" in champ:
+                names[str(champ["key"])] = champ["name"]
+
+    entries = []
+    for row in rows:
+        try:
+            cid = str(row["champion_id"])
+            entries.append(TierListEntry(
+                name=names.get(cid, f"#{cid}"),
+                champion_id=cid,
+                win_rate=float(row["win_rate"]),
+                pick_rate=float(row["pick_rate"]),
+                matches=int(row["matches"]),
+            ))
+        except (KeyError, TypeError, ValueError):
+            continue
+    entries.sort(key=lambda e: e.matches, reverse=True)
+
+    match = re.search(r"/(\d{1,2})_(\d{1,2})/", key)
+    patch = patch_display(f"{match.group(1)}_{match.group(2)}") if match else None
+    return TierListData(entries=entries, patch=patch)
 
 
 def parse_lane_champions(page: Selector) -> list[str]:
